@@ -12,3 +12,4 @@ pypdf
 python-docx
 google-generativeai
 langchain_google_genai
+langchain_chroma
