@@ -1,69 +1,43 @@
 
 from utils.embeddings import get_query_embedding
 from utils.vector_store import search_vectors
-from utils.database import fetch_chunks, save_message, load_session_history, fetch_messages
-from langchain.chains import RetrievalQA, create_history_aware_retriever, create_retrieval_chain
+from utils.database import fetch_chunks
+from langchain.chains import RetrievalQA
 from langchain.docstore.document import Document
 from langchain_google_genai import GoogleGenerativeAI
 from dotenv import load_dotenv
 from langchain_community.embeddings.google_palm import GooglePalmEmbeddings
 import os
-from langchain_core.prompts import PromptTemplate, ChatPromptTemplate, MessagesPlaceholder
+from langchain_core.prompts import PromptTemplate
 from langchain_core.runnables import RunnablePassthrough
 from langchain_core.output_parsers import StrOutputParser
+from utils.database import store_chunks, fetch_chunks, save_message, load_session_history, fetch_messages
 from langchain_chroma import Chroma
-from langchain.memory import ChatMessageHistory
-from langchain.chains import LLMChain
-from langchain.chains import LLMChain, RetrievalQA
+import streamlit as st
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langchain.chains import create_history_aware_retriever, create_retrieval_chain
+from langchain.chains.combine_documents import create_stuff_documents_chain
 from langchain_core.runnables.history import RunnableWithMessageHistory
-from langchain.memory import ChatMessageHistory
-from langchain.schema import HumanMessage, AIMessage
-from langchain.docstore.document import Document
-from langchain.vectorstores import Chroma
-from langchain.chains import DocumentChain
+from langchain_core.chat_history import BaseChatMessageHistory
+from langchain_google_genai import GoogleGenerativeAIEmbeddings
+from langchain.memory import ConversationBufferMemory
 
 
-# Load environment variables
+
 load_dotenv()
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 os.environ["GOOGLE_API_KEY"] = GOOGLE_API_KEY
-
-# Initialize models
 llm = GoogleGenerativeAI(model="gemini-pro", temperature="0.1")
-embeddings_model = GooglePalmEmbeddings()
-
-# Initialize an in-memory chat history
-demo_ephemeral_chat_history = ChatMessageHistory()
+embeddings_model = GoogleGenerativeAIEmbeddings(model= "models/embedding-001")
+# embeddings_model = GooglePalmEmbeddings()
 
 def get_chat_history(session_id):
     messages = fetch_messages(session_id)
-    chat_history = ChatMessageHistory()
+    chat_history = []
     for role, content in messages:
-        if role == "user":
-            chat_history.add_user_message(content)
-        elif role == "assistant" or role == "ai":
-            chat_history.add_ai_message(content)
+        chat_history.append({"role": role, "content": content})
+   
     return chat_history
-
-def summarize_messages():
-    stored_messages = demo_ephemeral_chat_history.messages
-    if len(stored_messages) == 0:
-        return False
-    
-    summarization_prompt = ChatPromptTemplate.from_messages(
-        [
-            MessagesPlaceholder(variable_name="chat_history"),
-            ("user", "Distill the above chat messages into a single summary message. Include as many specific details as you can."),
-        ]
-    )
-    summarization_chain = summarization_prompt | llm
-    summary_message = summarization_chain.invoke({"chat_history": stored_messages})
-    
-    demo_ephemeral_chat_history.clear()
-    demo_ephemeral_chat_history.add_message(summary_message)
-    
-    return True
 
 def process_query(query: str):
     # Get the query embedding and search for similar chunks
@@ -71,68 +45,108 @@ def process_query(query: str):
     similar_chunk_ids = search_vectors(query_vector, n_results=10)
     relevant_chunks = fetch_chunks(similar_chunk_ids)
     
-    # Retrieve chat history and update in-memory history
+    # Retrieve chat history from the database
     session_id = "1"  # Replace with actual session ID
     chat_history = get_chat_history(session_id)
-    demo_ephemeral_chat_history = chat_history
-
+    
+    # Format chat history for context
+    formatted_chat_history = "\n".join(
+        [f"{msg['role'].capitalize()}: {msg['content']}" for msg in chat_history]
+    )
+    
+    # Combine chat history with relevant chunks
+    context = (
+        f"Chat History:\n{formatted_chat_history}\n\nRelevant Context:\n" +
+        "\n\n".join([chunk.page_content for chunk in relevant_chunks])
+    )
+    
     # Define the prompt template
-    prompt = ChatPromptTemplate.from_messages(
+    template = """You are an advanced assistant for question-answering tasks. Your goal is to provide accurate, comprehensive, and helpful responses based on the given context.
+
+    {context}
+
+    Question: {question}
+
+    Helpful Answer:"""
+    custom_rag_prompt = PromptTemplate.from_template(template)
+    
+    # Create the Retrieval-Augmented Generation (RAG) chain
+    rag_chain = (
+        {"context": lambda q: context, "question": RunnablePassthrough()}
+        | custom_rag_prompt
+        | llm
+        | StrOutputParser()
+    )
+    
+    # Process the query and get the response
+    response = rag_chain.invoke(query)
+    
+    # Store the current message and response
+    save_message(session_id, "user", query)
+    save_message(session_id, "assistant", response)
+    
+    return response
+
+
+
+
+
+
+
+
+
+
+def process_chat_history(query: str, session_id: str):
+    # Retrieve chat history from the database
+    chat_history = get_chat_history(session_id)
+
+    # Log or print the structure of chat_history to check keys
+    # print(chat_history)  # Uncomment this to inspect the structure during debugging
+
+    # Adjust the key based on the actual structure of the messages
+    try:
+        combined_context = "\n".join([msg['text'] for msg in chat_history]) + "\n" + query
+    except KeyError:
+        # Fallback if 'text' key doesn't exist, inspect other possible keys (e.g., 'message', 'content', etc.)
+        combined_context = "\n".join([msg.get('message', '') for msg in chat_history]) + "\n" + query
+    
+    # Continue with the rest of the processing
+    query_vector = get_query_embedding(combined_context)
+    
+    # Search for similar chunks in the uploaded PDF or document
+    similar_chunk_ids = search_vectors(query_vector, n_results=5)
+    relevant_chunks = fetch_chunks(similar_chunk_ids)
+    
+    # Vector store from documents (PDF chunks or other relevant text)
+    vectorstore = Chroma.from_documents(documents=relevant_chunks, embedding=embeddings_model)
+    retriever = vectorstore.as_retriever()
+    
+    # Define prompts to contextualize the follow-up question
+    contextualize_q_system_prompt = """Given a chat history and the latest user question 
+    which might reference context in the chat history, formulate a standalone question 
+    which can be understood without the chat history. Do NOT answer the question, 
+    just reformulate it if needed and otherwise return it as is."""
+    
+    contextualize_q_prompt = ChatPromptTemplate.from_messages(
         [
-            ("system", "You are a helpful assistant. Answer all questions to the best of your ability. The provided chat history includes facts about the user you are speaking with."),
-            MessagesPlaceholder(variable_name="chat_history"),
-            ("user", "{input}"),
+            ("system", contextualize_q_system_prompt),
+            MessagesPlaceholder("chat_history"),
+            ("human", "{input}"),
         ]
     )
     
-    chain = prompt | llm
-
-    chain_with_message_history = RunnableWithMessageHistory(
-        chain,
-        lambda session_id: demo_ephemeral_chat_history,
-        input_messages_key="input",
-        history_messages_key="chat_history",
+    # Create history-aware retriever and chain for follow-up questions
+    history_aware_retriever = create_history_aware_retriever(
+        llm, retriever, contextualize_q_prompt
     )
-
-    # Save the user query
-    save_message(session_id, "user", query)
     
-    # Process the query and get the response
-    result = chain_with_message_history.invoke(
-        {"input": query},
-        {"configurable": {"session_id": "unused"}}
-    )["answer"]
-
-    # Save the AI answer
-    save_message(session_id, "ai", result)
-    return result
-
-# Fetch chat history from database and convert to in-memory history
-def get_chat_history(session_id):
-    messages = fetch_messages(session_id)
-    chat_history = []
-    for role, content in messages:
-        if role == "user":
-            chat_history.append(HumanMessage(content=content))
-        elif role == "ai":
-            chat_history.append(AIMessage(content=content))
-    return chat_history
-
-# Process query using RetrievalQA and LLMChain
-def process_chat_history(query: str):
-    # Get query embedding and search for similar chunks
-    query_vector = get_query_embedding(query)
-    similar_chunk_ids = search_vectors(query_vector, n_results=5)
-    relevant_chunks = fetch_chunks(similar_chunk_ids)
-
-    # Create in-memory chat history
-    session_id = "1"  # Replace with actual session ID
-    chat_history_messages = get_chat_history(session_id)
-    demo_ephemeral_chat_history = ChatMessageHistory(messages=chat_history_messages)
-
-    # Define the QA prompt template
-    qa_system_prompt = """You are an assistant for question-answering tasks. Use the following pieces of retrieved context to answer the question. If you don't know the answer, just say that you don't know. Use three sentences maximum and keep the answer concise."""
-
+    qa_system_prompt = """You are an assistant for question-answering tasks. 
+    Use the following pieces of retrieved context to answer the question. 
+    If you don't know the answer, just say that you don't know. 
+    Use three sentences maximum and keep the answer concise.
+    
+    {context}"""
+    
     qa_prompt = ChatPromptTemplate.from_messages(
         [
             ("system", qa_system_prompt),
@@ -140,37 +154,38 @@ def process_chat_history(query: str):
             ("human", "{input}"),
         ]
     )
-
-    # Create LLM chain with the QA prompt
-    llm_chain = LLMChain(llm=llm, prompt=qa_prompt)
-
-    # Create a vectorstore and retriever
-    vectorstore = Chroma.from_documents(documents=relevant_chunks, embedding=embeddings_model)
-    retriever = vectorstore.as_retriever()
-
-    # Create the RetrievalQA chain
-    retrieval_chain = RetrievalQA(
-        combine_documents_chain=llm_chain,  # Use LLMChain directly for document combination
-        retriever=retriever
-    )
-
-    # Create RunnableWithMessageHistory for managing chat history
-    chain_with_message_history = RunnableWithMessageHistory(
-        retrieval_chain,
-        lambda session_id: demo_ephemeral_chat_history,
+    
+    # Chain to answer based on retrieved documents
+    question_answer_chain = create_stuff_documents_chain(llm, qa_prompt)
+    rag_chain = create_retrieval_chain(history_aware_retriever, question_answer_chain)
+    
+    # Store session chat history for updating context across follow-up questions
+    store = {}
+    
+    def get_session_history(session_id: str) -> BaseChatMessageHistory:
+        if session_id not in store:
+            store[session_id] = load_session_history(session_id)
+        return store[session_id]
+    
+    # Manage conversational RAG chain with history and update chunks
+    conversational_rag_chain = RunnableWithMessageHistory(
+        rag_chain,
+        get_session_history,
         input_messages_key="input",
         history_messages_key="chat_history",
+        output_messages_key="answer",
     )
-
-    # Save the user query
-    save_message(session_id, "user", query)
     
-    # Process the query and get the response
-    result = chain_with_message_history.invoke(
+    # Save user query to chat history
+    save_message(session_id, "human", query)
+    
+    # Process the query using the conversational RAG chain
+    result = conversational_rag_chain.invoke(
         {"input": query},
-        {"configurable": {"session_id": "unused"}}
+        config={"configurable": {"session_id": session_id}}
     )["answer"]
-
-    # Save the AI answer
+    
+    # Save AI's answer to the chat history
     save_message(session_id, "ai", result)
+    
     return result

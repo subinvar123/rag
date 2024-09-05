@@ -2,6 +2,7 @@ from langchain_community.embeddings.google_palm import GooglePalmEmbeddings
 from langchain.docstore.document import Document
 from dotenv import load_dotenv
 from typing import List, Union
+from langchain_google_genai import GoogleGenerativeAIEmbeddings
 import os
 
 
@@ -10,7 +11,8 @@ load_dotenv()
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 os.environ["GOOGLE_PALM_API_KEY"] = GOOGLE_API_KEY
 
-embeddings_model = GooglePalmEmbeddings()
+embeddings_model = GoogleGenerativeAIEmbeddings(model= "models/embedding-001")
+# embeddings_model = GooglePalmEmbeddings()
 
 def get_embeddings(texts: Union[List[str], List[Document]]) -> List[List[float]]:
     if isinstance(texts[0], Document):

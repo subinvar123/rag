@@ -196,3 +196,8 @@ def fetch_messages(session_id):
     conn.close()
     return results
     # Modify the get_session_history function to use the database
+    results = cur.fetchall()
+    
+    conn.close()
+    return results
+    # Modify the get_session_history function to use the database

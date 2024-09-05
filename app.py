@@ -109,7 +109,7 @@ def main():
         # Process the query and generate a response
         with st.spinner("Generating response..."):
             #response = process_query(prompt)
-            response = process_chat_history(prompt)
+            response = process_chat_history(prompt, session_id)
         
         # Display assistant response in chat message container
         with st.chat_message("assistant"):
