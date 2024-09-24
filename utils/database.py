@@ -111,22 +111,6 @@ def get_db():
     finally:
         db.close()
 
-def save_message(session_id: str, role: str, content: str):
-    db = next(get_db())
-    try:
-        session = db.query(Session).filter(Session.session_id == session_id).first()
-        if not session:
-            session = Session(session_id=session_id)
-            db.add(session)
-            db.commit()
-            db.refresh(session)
-
-        db.add(Message(session_id=session.id, role=role, content=content))
-        db.commit()
-    except SQLAlchemyError:
-        db.rollback()
-    finally:
-        db.close()
 
 def load_session_history(session_id: str) -> BaseChatMessageHistory:
     db = next(get_db())
@@ -183,21 +167,44 @@ def fetch_chunks(chunk_ids):
     conn.close()
     return chunks
 
+def save_message(session_id: str, role: str, content: str):
+    db = next(get_db())
+    try:
+        session = db.query(Session).filter(Session.session_id == session_id).first()
+        if not session:
+            session = Session(session_id=session_id)
+            db.add(session)
+            db.commit()
+            db.refresh(session)
+
+        db.add(Message(session_id=session_id, role=role, content=content))
+        db.commit()
+    except SQLAlchemyError:
+        db.rollback()
+    finally:
+        db.close()
+
 def fetch_messages(session_id):
+    # Ensure session_id is an integer
+    session_id = int(session_id)
+
     conn = get_db_connection()
-    with conn.cursor() as cur:
-        cur.execute("""
-            SELECT role, content FROM messages
-            WHERE session_id = %s
-            ORDER BY id ASC
-        """, (session_id,))
-        results = cur.fetchall()
+    try:
+        with conn.cursor() as cur:
+            # Use the session_id correctly and fetch all messages for the session
+            cur.execute("""
+                SELECT role, content FROM messages
+                WHERE session_id = %s
+                ORDER BY id ASC
+            """, (session_id,))  # Ensure session_id is passed correctly
+            
+            # Fetch all results after executing the query
+            results = cur.fetchall()
+    finally:
+        # Ensure the connection is closed, even if an error occurs
+        conn.close()
     
-    conn.close()
+    # Return the results, which are the chat history
     return results
-    # Modify the get_session_history function to use the database
-    results = cur.fetchall()
-    
-    conn.close()
-    return results
-    # Modify the get_session_history function to use the database
+
+

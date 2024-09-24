@@ -1,30 +1,38 @@
 import chromadb
 import uuid
-
-# chroma_client = Client(Settings(persist_directory="./chroma_db"))
-# collection = chroma_client.get_or_create_collection(name=collection_name)
+from langchain_chroma import Chroma
+from langchain_google_genai import GoogleGenerativeAIEmbeddings
 
 client = chromadb.PersistentClient(path="./chroma_db")
-collection_name = "document_chunks"
+collection_name = "doc_collection"
 collection = client.get_or_create_collection(name=collection_name)
 
+embeddings = GoogleGenerativeAIEmbeddings(model= "models/embedding-001")
 
-def store_vectors(chunks, vectors):
+
+vector_store = Chroma(
+    collection_name=collection_name,
+    embedding_function=embeddings,
+    persist_directory="./chroma_db",
+)
+
+
+def store_vectors(documents):
     
-    ids = [str(uuid.uuid4()) for _ in chunks]
-    metadatas = [{"source": chunk.metadata.get("source", ""), "page": chunk.metadata.get("page", 0)} for chunk in chunks]
-    
-    collection.add(
-        ids=ids,
-        embeddings=vectors,
-        metadatas=metadatas
+    uuids = [str(uuid.uuid4()) for _ in range(len(documents))]
+    vector_store.add_documents(documents=documents, ids=uuids)
+ 
+
+def search_vectors(query, n_results):
+    results = vector_store.similarity_search_by_vector(
+        embedding=embeddings.embed_query(query), k=n_results
     )
-    return ids
+    return results
 
 
-def search_vectors(query_vector, n_results=5):
-    results = collection.query(
-        query_embeddings=[query_vector],
-        n_results=n_results
+def get_retriever():
+    retriever = vector_store.as_retriever(
+        search_type="similarity",
+        search_kwargs={'k': 5}
     )
-    return results['ids'][0]
+    return retriever
